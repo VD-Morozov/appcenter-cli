@@ -19,9 +19,19 @@ import * as pfs from "../../../util/misc/promisfied-fs";
 import { sign, zip } from "./update-contents-tasks";
 import { isBinaryOrZip, getLastFolderInPath, moveReleaseFilesInTmpFolder, isDirectory } from "./file-utils";
 import { isValidRange, isValidRollout, isValidDeployment, validateVersion } from "./validation-utils";
-import FileUploadClient, { MessageLevel } from "appcenter-file-upload-client";
 import { DefaultApp } from "../../../util/profile";
 import * as chalk from "chalk";
+import {
+  ACFile,
+  ACFusMessageLevel,
+  ACFusNodeUploader,
+  ACFusUploader,
+  ACFusUploadState,
+  IInitializeSettings,
+  IProgress,
+  IUploadStats,
+  LogProperties,
+} from "appcenter-file-upload-client-node";
 
 const debug = require("debug")("appcenter-cli:commands:codepush:release-base");
 
@@ -80,12 +90,10 @@ export default class CodePushReleaseCommandBase extends AppCommand {
 
   protected targetBinaryVersion: string;
 
-  private readonly fileUploadClient: FileUploadClient;
+  private acFusUploader?: ACFusUploader;
 
   constructor(args: CommandArgs) {
     super(args);
-
-    this.fileUploadClient = new FileUploadClient();
   }
 
   public async run(client: AppCenterClient): Promise<CommandResult> {
@@ -200,16 +208,35 @@ export default class CodePushReleaseCommandBase extends AppCommand {
   }
 
   private async uploadBundle(releaseUpload: models.CodePushReleaseUpload, bundleZipPath: string): Promise<void> {
-    debug(`Starting to upload the release bundle: ${bundleZipPath} with upload data: ${inspect(releaseUpload)}`);
+    return new Promise<void>((resolve, reject) => {
+      debug(`Starting to upload the release bundle: ${bundleZipPath} with upload data: ${inspect(releaseUpload)}`);
+      const uploadSettings: IInitializeSettings = {
+        assetId: releaseUpload.id,
+        urlEncodedToken: releaseUpload.token,
+        uploadDomain: releaseUpload.uploadDomain,
+        tenant: "distribution",
+        onProgressChanged: (progress: IProgress) => {
+          debug("onProgressChanged: " + progress.percentCompleted);
+        },
+        onMessage: (message: string, properties: LogProperties, level: ACFusMessageLevel) => {
+          debug(`Upload client message:: ${message} \nMessage properties: ${JSON.stringify(properties)}`);
+          if (level === ACFusMessageLevel.Error) {
+            this.acFusUploader.cancel();
+            reject(new Error(`Uploading file error: ${message}`));
+          }
+        },
+        onStateChanged: (status: ACFusUploadState): void => {
+          debug(`onStateChanged: ${status.toString()}`);
+        },
+        onCompleted: (uploadStats: IUploadStats) => {
+          debug("Upload completed, total time: " + uploadStats.totalTimeInSeconds);
+          resolve();
+        },
+      };
 
-    await this.fileUploadClient.upload({
-      assetId: releaseUpload.id,
-      assetDomain: releaseUpload.uploadDomain,
-      assetToken: releaseUpload.token,
-      file: bundleZipPath,
-      onMessage: (message: string, level: MessageLevel) => {
-        debug(`Upload client message: ${message}`);
-      },
+      this.acFusUploader = new ACFusNodeUploader(uploadSettings);
+      const appFile = new ACFile(bundleZipPath);
+      this.acFusUploader.start(appFile);
     });
   }
 
